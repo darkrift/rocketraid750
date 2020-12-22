@@ -1,0 +1,15 @@
+[Unit]
+Description=LSB: Build driver for HighPoint HBA if kernel changed.
+#Requires=network-online.target network.service
+Wants=network.service network-online.target
+After=network.service network-online.target
+
+[Service]
+Type=forking
+ExecStart=/etc/init.d/hptdrv-monitor start
+ExecStop=/etc/init.d/hptdrv-monitor stop
+RemainAfterExit=yes
+TimeoutSec=0
+
+[Install]
+WantedBy=default.target

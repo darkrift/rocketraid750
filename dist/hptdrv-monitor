@@ -1,0 +1,933 @@
+#!/bin/bash
+# chkconfig: 12345 10 10
+# description: Rebuild driver for HighPoint HBA if kernel changed.
+### BEGIN INIT INFO
+# Provides: hptdrv-monitor
+# Required-Start:
+# Required-Stop: reboot network networking network-manager umountroot
+# Default-Start: 2 3 4 5
+# Default-Stop: 0 1 6
+# Short-Description: Rebuild driver for HighPoint HBA if kernel added.
+### END INIT INFO
+
+#. /etc/init.d/functions
+
+DAEMON=hptdrv-monitor
+pidfile=/var/run/yum.pid
+drvroot=/usr/share/hptdrv
+if test ! -d "${drvroot}"; then
+  exit 0
+fi
+
+getmodules()
+{
+  if test "${modules}" != ""; then
+    #echo "Specify module to monitor: ${modules}" > /dev/stderr
+    for mod in ${modules}; do
+      mod=$(basename "${mod}")
+     if test -d "${drvroot}/${mod}"; then
+       echo "${mod}"
+     fi
+    done
+  else
+    for mod in $(ls "${drvroot}"); do
+      mod=$(basename "${mod}")
+      if test -d "${drvroot}/${mod}"; then
+        echo "${mod}"
+      fi
+    done
+  fi
+}
+
+modules=`getmodules`
+if test "${modules}" = ""; then
+  exit 0
+fi
+
+date=`date +%Y%m%d%H%M%S`
+temp=/var/tmp
+lock=/var/lib/hptdrv-monitor
+[ -d /var/lock/subsys ] && lock=/var/lock/subsys/hptdrv-monitor
+logfile=/var/log/hptdrv.log
+
+roothome=`cat /etc/passwd | cut -d: -f3,6 | grep ^0\: | cut -d: -f2 | head -1`
+if test "${roothome}" = ""; then
+  roothome=/
+fi
+
+export DEBIAN_FRONTEND=noninteractive
+
+rtrn=1
+warn=1
+FORCE=0
+
+test "$runlevel" = "0" && warn=0
+test "$runlevel" = "6" && warn=0
+
+logecho()
+{
+  echo "${1}" >> "${logfile}"
+}
+
+logcat()
+{
+  echo "${1}:" >> "${logfile}"
+  cat "${1}" >> "${logfile}"
+  echo "--- --- --- end content --- --- ---" >> "${logfile}"
+}
+
+loglist()
+{
+  echo "Listing ${1}:" >> "${logfile}"
+  ls -lR "${1}" >> "${logfile}"
+  echo "--- --- --- end list --- --- ---" >> "${logfile}"
+}
+
+if test -e /etc/redhat-release; then
+  dist="centos"
+elif test -e /etc/debian_version; then
+  dist="debian"
+else
+  dist=""
+fi
+
+kernelver()
+{
+  kerverfromname=`echo $1 | rev | cut -d\/ -f1 | rev | cut -d- -f2-`
+  kerverfrommagic=`echo $1 | xargs file -b | sed s'#.*version \+\([^ ]*\) .*#\1#'`
+
+  kerver=""
+  if ( echo "$kerverfrommagic" | grep -s -q -e ^'2\.6\.[0-9]' -e ^'3\.[0-9]' -e ^'4\.[0-9]' ); then
+    kerver=$kerverfrommagic
+  elif ( echo "$kerverfromname" | grep -s -q -e ^'2\.6\.[0-9]' -e ^'3\.[0-9]' -e ^'4\.[0-9]' ); then
+    kerver=$kerverfromname
+  fi
+  logecho "kernelver:kernel ${1}"
+  logecho "kernelver:kernel version from name: ${kerverfromname}"
+  logecho "kernelver:kernel version from magic: ${kerverfrommagic}"
+  logecho "kernelver:--------------------"
+  echo "$kerver"
+  return
+}
+
+checkyum()
+{
+  if test -f "$pidfile"; then
+    if test "$1" = "check"; then
+      echo "YUM is being used: enter 'q' to exit the kernel-devel list or waiting 1 minutes."
+    else
+      echo "YUM is being used: enter 'q' to exit the $1 installation or waiting 1 minutes."
+    fi
+    i=0
+    while test -f "$pidfile"; do
+      echo -n .
+      if test $i -gt 60; then
+        return 1
+      fi
+      read -t 1 c
+      if test "${c}" = "q"; then
+        return 1
+      fi
+      let i=$i+1
+    done
+    echo
+  fi
+}
+
+checkapt()
+{
+  lockfile=/var/lib/dpkg/lock
+
+  if test -f "$lockfile"; then
+    if lsof "$lockfile" >/dev/null 2>&1 ;then
+      if test "$1" = "check"; then
+        echo "APT is being used: enter 'q' to exit the kernel-devel list."
+      else
+        echo "APT is being used: enter 'q' to exit the $1 installation."
+      fi
+    fi
+    while lsof "$lockfile" >/dev/null 2>&1; do
+      echo -n .
+      read -t 1 c
+      if test "${c}" = "q"; then
+        return 1
+      fi
+    done
+    echo
+  fi
+  return 0
+}
+
+systemkernels()
+{
+  local kernels=$( ls /boot/vmlinuz-* 2>/dev/null )
+  if test "${kernels}" = ""; then
+    echo ""
+    return 1
+  fi
+
+  for kernel in ${kernels}; do
+    kerver=`kernelver ${kernel}`
+    if test "${kerver}" = ""; then
+      continue
+    fi
+    if test -d "/lib/modules/${kerver}"; then
+      echo "${kernel}"
+    fi
+  done
+  return 0
+}
+
+installpkg()
+{
+  if ! type $1 >/dev/null 2>&1; then
+    logecho "installpkg:installing required package: $1(dist $dist)"
+    if test "$dist" = "centos"; then
+      checkyum $1
+      if test $? != 0; then
+        return 1
+      fi
+      yum -y --quiet install ${1} >/dev/null 2>&1
+    elif test "$dist" = "debian"; then
+      checkapt $1
+      if test $? != 0; then
+        return 1
+      fi
+      dpkg --configure -a
+      apt-get -y -qq install ${1} >>$logfile 2>&1
+    else
+      false
+    fi
+    if test $? != 0; then
+      logecho "installpkg:failed to install package $1."
+      return 1
+    fi
+  fi
+  return 0
+}
+
+checkpkg()
+{
+  if ! type $1 > /dev/null 2>&1; then
+    logecho "checkpkg:package $1 is missing."
+    return 1
+  else
+    return 0
+  fi
+}
+
+checktool()
+{
+  installpkg gcc
+  checkpkg gcc
+  if test $? != "0"; then
+    return 1
+  fi
+  installpkg make
+  checkpkg make
+  if test $? != "0"; then
+    return 1
+  fi
+  installpkg perl
+  checkpkg perl
+  if test $? != "0"; then
+    return 1
+  fi
+}
+
+getdefaultkernelold()
+{
+  if test -x /sbin/grubby; then
+    /sbin/grubby --default-kernel
+  else
+    cfg=""
+    if test -f /boot/grub/grub.conf; then
+      cfg=/boot/grub/grub.conf
+    elif test -f /boot/grub/menu.lst; then
+      cfg=/boot/grub/menu.lst
+    fi
+
+    if test "${cfg}" = ""; then
+      echo ""
+      return
+    fi
+
+    no=`grep ^default ${cfg} | cut -d= -f2 | sed s#[[:space:]].#\ #g | cut -d\  -f2`
+    if test "${no}" = ""; then
+      no=0
+    fi
+
+    j=0
+    for i in `grep -n ^title ${cfg} | cut -d: -f1`; do
+      if test "${j}" = "${no}"; then
+        break;
+      fi
+      let j=j+1
+    done
+
+    if test "${j}" = "${no}"; then
+      line=($(sed -n "${i},/title/p" "${cfg}" | grep ^kernel | grep -v ^\# | grep -v [[:space:]]\# | tail -1))
+      for k in "${!line[@]}"; do
+        if echo "${line[$k]}" | grep -s -q vmlinuz; then
+          kernel=`basename "${line[$k]}"`
+          echo "/boot/${kernel}"
+          return
+        fi
+      done
+      #kernel=$(basename "${line[2]}")
+      #echo "/boot/${kernel}"
+      return
+    fi
+
+    echo ""
+    return
+  fi
+}
+
+getbootcfg()
+{
+  if test -f /boot/grub/grub.conf; then
+    echo /boot/grub/grub.conf
+  elif test -f /boot/grub/grub.cfg; then
+    echo /boot/grub/grub.cfg
+  elif test -f /boot/grub2/grub.cfg; then
+    echo /boot/grub2/grub.cfg
+  elif test -f /boot/grub/menu.lst; then
+    echo /boot/grub/menu.lst
+  fi
+  return
+}
+
+getdefaultkernel()
+{
+  if test -x /sbin/grubby; then # rhel/fedora/centos
+    /sbin/grubby --default-kernel
+  else
+    cfg=`getbootcfg`
+
+    if test "${cfg}" = ""; then
+      logecho "getdefaultkernel:no cfg"
+      return
+    fi
+
+    logecho "getdefaultkernel:$cfg"
+
+    if grep -s -q menuentry ${cfg}; then
+      # grub 2.x
+      no=`grep "^set default" ${cfg} | cut -d= -f2 | cut -d\  -f2 | sed s'#\"##'g`
+      if test "${no}" = ""; then
+        no=0
+      fi
+      if echo ${no} | grep -s -q '>'; then
+        sub=`echo "$no" | cut -d">" -f2`
+        no=`echo "$no" | cut -d">" -f1`
+      else
+        sub=0
+      fi
+      let sub=sub+1
+      let no=no+1
+
+      logecho "getdefaultkernel:${no}-${sub}"
+
+      j=0
+      k=0
+      # array of all items.
+      p=(`grep -n -E '^[[:space:]]*(menuentry|submenu|}|\{)[[:space:]]*' "${cfg}" | cut -d: -f1`)
+      subcount=-1
+      insub=0
+      logecho "${p[@]}"
+      for s in ${p[@]}; do
+        #logecho "$s $insub $subcount $j $k - $no $sub"
+        if sed -n ${s}p ${cfg} | grep -s -q ^[[:space:]]*submenu; then
+          insub=1
+          let j=j+1
+          k=0
+          subcount=0
+        elif sed -n ${s}p ${cfg} | grep -s -q ^[[:space:]]*menuentry[[:space:]]; then
+          if test $insub -eq 1; then
+            let k=k+1
+            let subcount=subcount+1
+          else
+            let j=j+1
+            let k=k+1
+          fi
+          if test "${j}" = "${no}"; then
+            if test "${k}" = "$sub"; then
+              line=($(sed -n "${s},/}/p" "${cfg}" | grep ^[[:space:]]*linux | tail -1))
+              kernel=$(basename "${line[1]}")
+              logecho "getdefaultkernel:/boot/${kernel}"
+              echo "/boot/${kernel}"
+              return
+            fi
+          fi
+        elif sed -n ${s}p ${cfg} | grep -s -q ^[[:space:]]*\}; then
+          if test $insub -eq 1; then
+            let subcount=subcount-1
+            if test $subcount -eq -1; then
+              insub=0
+              k=0
+            fi
+          fi
+        fi
+      done
+    else
+      # grub 0.xx
+      no=`grep ^default ${cfg} | cut -d= -f2 | sed s#[[:space:]].#\ #g | cut -d\  -f2`
+      #no=`grep ^default ${cfg} | cut -d= -f2 | cut -d\  -f2`
+      if test "${no}" = ""; then
+        no=0
+      fi
+
+      j=0
+      for i in `grep -n ^title ${cfg} | cut -d: -f1`; do
+        if test "${j}" = "${no}"; then
+          break;
+        fi
+        let j=j+1
+      done
+
+      if test "${j}" = "${no}"; then
+        line=($(sed -n "${i},/title/p" "${cfg}" | grep ^[[:space:]]*kernel | tail -1))
+        for k in "${!line[@]}"; do
+          if echo "${line[$k]}" | grep -s -q vmlinuz; then
+            kernel=`basename "${line[$k]}"`
+            echo "/boot/${kernel}"
+            return
+          fi
+        done
+        #kernel=$(basename "${line[2]}")
+        #echo "/boot/${kernel}"
+        return
+      fi
+
+      echo ""
+      return
+    fi
+  fi
+}
+
+downloadinstall()
+{
+  name=$(basename "$1")
+  baseurl=$(dirname "$1")
+  rm -f /var/tmp/${name}
+  if type curl > /dev/null 2>&1; then
+    if curl --connect-timeout 10 -s "${baseurl}/" 2>&1 | grep -s -q "${name}"; then
+      logecho "downloadinstall:downloading package ${name} from ${baseurl}."
+      curl --connect-timeout 10 -s -o /var/tmp/${name} "${baseurl}/${name}"
+      if test $? = 0; then
+        logecho "downloadinstall:installing package ${name} from downloader."
+        checkyum kernel-devel
+        if test $? != 0; then
+          return 1
+        fi
+        yum -y --quiet localinstall /var/tmp/${name} >/dev/null 2>&1
+        rm -f /var/tmp/${name}
+       return 0
+      fi
+    fi
+  fi
+  return 1
+}
+
+installkerneldcentos()
+{
+  cdroms=$(ls /dev/sr* 2>/dev/null)
+  if test "${cdroms}" != ""; then
+    for i in ${cdroms}; do
+      mkdir -p /var/tmp/cdrom
+      if test -e $i; then
+        mount $i /var/tmp/cdrom > /dev/null 2>&1
+        if test $? != "0"; then
+          rmdir /var/tmp/cdrom
+          continue
+        fi
+
+        if test -f /var/tmp/cdrom/.discinfo; then
+          break
+       else
+          umount /var/tmp/cdrom
+          rmdir /var/tmp/cdrom
+        fi
+      fi
+    done
+  fi
+
+  #if ! test -d /var/tmp/cdrom; then
+  #  echo "Installation media was not found."
+  #fi
+
+  kernels=$(rpm -qa kernel)
+
+  if test "$kernels" = ""; then
+    return 0
+  fi
+  kernelds=$(rpm -qa kernel-devel)
+  checkyum check
+  if test ! -f "$pidfile"; then
+    reps=$(yum --quiet --showduplicates list kernel-devel 2>/dev/null | grep ^Avail -A 100 | grep kernel-devel)
+  fi
+
+  for kernel in ${kernels}; do
+    kerneld=${kernel/kernel/kernel-devel}
+    if echo "${kernelds}" | grep -s -q ^${kerneld}$; then
+      continue
+    fi
+
+    if ! echo "${kernel}" | grep -s -q $1; then
+      continue
+    fi
+
+    pkgversion=${kernel/kernel-}
+    pkgversion=$(echo ${pkgversion} | rev | cut -d. -f2- | rev)
+    inreps=0
+    if test "$pkgversion" != ""; then
+      if echo "${reps}" | grep -s -q "${pkgversion}"; then
+        inreps=1
+      fi
+    fi
+
+    if test -f /var/tmp/cdrom/Packages/${kerneld}.rpm; then
+      logecho "installkerneldcentos:installing package ${kerneld}.rpm from installation medium."
+      checkyum kernel-devel
+      if test $? != 0; then
+        return 1
+      fi
+      yum -y --quiet localinstall /var/tmp/cdrom/Packages/${kerneld}.rpm >/dev/null 2>&1
+      if test $? != 0; then
+        logecho "installkerneldcentos:failed to install package ${kerneld}.rpm."
+      fi
+    elif test "$inreps" = "1"; then
+      logecho "installkerneldcentos:installing package ${kerneld}.rpm from yum repository."
+      checkyum kernel-devel
+      if test $? != 0; then
+        return 1
+      fi
+      yum -y --quiet install ${kerneld} >/dev/null 2>&1
+      if test $? != 0; then
+        logecho "installkerneldcentos:failed to install package ${kerneld}.rpm."
+      fi
+    else
+      if echo ${pkgversion} | grep -s -q 2\\.6\\.32; then
+        maj=6
+        rev=$(echo ${pkgversion} | cut -d- -f2 | cut -d. -f1)
+        dir=Packages
+        if echo ${kerneld} | grep -s -q x86_64; then
+          arch=x86_64
+        else
+          arch=i386
+        fi
+        case "${rev}" in
+          71)
+            dir=RPMS
+            min=0
+            ;;
+          131)
+            min=1
+            ;;
+          220)
+            min=2
+            ;;
+          279)
+            min=3
+            ;;
+          358)
+            min=4
+            ;;
+          431)
+            min=5
+            ;;
+          *)
+            min=""
+            ;;
+        esac
+
+        if test "${min}" = ""; then
+          continue
+        fi
+
+        if test "${min}" -gt 3; then
+          downloadinstall http://mirrors.kernel.org/centos/${maj}.${min}/os/${arch}/${dir}/${kerneld}.rpm
+          if test $? = 0; then
+            continue
+         fi
+
+          downloadinstall http://mirrors.kernel.org/centos/${maj}.${min}/updates/${arch}/${dir}/${kerneld}.rpm
+          if test $? = 0; then
+            continue
+          fi
+        fi
+
+        downloadinstall http://mirror.symnds.com/distributions/CentOS-vault/${maj}.${min}/os/${arch}/${dir}/${kerneld}.rpm
+        if test $? = 0; then
+          continue
+        fi
+
+        downloadinstall http://mirror.symnds.com/distributions/CentOS-vault/${maj}.${min}/updates/${arch}/${dir}/${kerneld}.rpm
+        if test $? = 0; then
+          continue
+        fi
+
+        downloadinstall http://vault.centos.org/${maj}.${min}/os/${arch}/${dir}/${kerneld}.rpm
+        if test $? = 0; then
+          continue
+        fi
+
+        downloadinstall http://vault.centos.org/${maj}.${min}/updates/${arch}/${dir}/${kerneld}.rpm
+        if test $? = 0; then
+          continue
+        else
+          logecho "installkerneldcentos:failed to download or install package ${kerneld}.rpm."
+        fi
+      fi
+      continue
+    fi
+  done
+
+  if test -d /var/tmp/cdrom; then
+    umount /var/tmp/cdrom
+    rmdir /var/tmp/cdrom
+  fi
+}
+
+installkernelddebian()
+{
+  pkg=`dpkg -S "$1" 2>/dev/null | cut -d: -f1`
+  if test "$pkg" != ""; then
+    pkgd=${pkg/image/headers}
+    checkapt $pkgd
+    logecho "installkernelddebian:installing package ${pkgd} from APT repository."
+    apt-get -y -qq install $pkgd
+  fi
+}
+
+dumpkernels()
+{
+  if test "$dist" = "centos"; then
+    kernelrpms=$(rpm -qa kernel)
+    kerneldrpms=$(rpm -qa kernel-devel)
+    if test ! -f $pidfile; then
+      reps=$(yum --quiet --showduplicates list kernel-devel 2>/dev/null | grep ^Avail -A 100 | grep kernel-devel)
+    else
+      reps="yum is in use"
+    fi
+  elif test "$dist" = "debian"; then
+    kernelrpms=$(dpkg -l linux-image-* 2>/dev/null | grep ====== -A100)
+    kerneldrpms=$(dpkg -l linux-headers-* 2>/dev/null | grep ====== -A100)
+    reps=$(apt-cache search linux-headers 2>/dev/null | sort | grep ^linux-headers)
+  else
+    kernelrpms="Unsupported dist"
+    kerneldrpms="Unsupported dist"
+    reps="Unsupported dist"
+  fi
+  logecho "dumpkernels:kernel rpms"
+  logecho "${kernelrpms}"
+  logecho "dumpkernels:kernel-devel rpms"
+  logecho "${kerneldrpms}"
+  logecho "dumpkernels:yum list kernel-devel"
+  logecho "${reps}"
+  logecho "dumpkernels:end"
+}
+
+compile()
+{
+  local ret=0
+  rm -f "${logfile}"
+
+  logecho "--- --- --- --- ${date} --- --- --- ---"
+  kernels=`systemkernels`
+  logecho "--- --- --- ---"
+  if test "${kernels}" = ""; then
+    logecho "main:no kernels detected."
+    loglist /boot
+    loglist /lib/modules
+    return 0
+  fi
+
+  mkdir -p "${temp}"
+
+  default=`getdefaultkernel`
+  logecho "compile:default boot kernel: ${default}"
+
+  dumpkernels
+  checktool
+  if test $? != 0; then
+    logecho "compile:some build tools are missing."
+    return 0
+  fi
+
+  for kernel in ${kernels}; do
+    kerver=`kernelver ${kernel}`
+
+    if test "$kernel" = "$default"; then
+      fatal=1
+      logecho "compile:kernel file ${kernel} version ${kerver} [default boot kernel]"
+    else
+      fatal=0
+      logecho "compile:kernel file ${kernel} version ${kerver}"
+    fi
+
+    kerneldir=/lib/modules/${kerver}/build
+    # todo only install kerneld for missing driver and default boot kernel
+    if test ! -d ${kerneldir}; then
+      if test ${fatal} = "1"; then
+        if echo "${kerver}" | grep -s -q \\.el6\\.; then
+          installkerneldcentos "${kerver}"
+        elif echo "${kerver}" | grep -s -q \\.el7\\.; then
+          installkerneldcentos "${kerver}"
+        elif test "$dist" = "debian"; then
+          installkernelddebian "${kernel}"
+        else
+          echo "Could not install kernel devel package for unofficial RHEL/CentOS 6 kernel ${kerver}."
+          logecho "compile:could not install kernel devel package for unofficial RHEL/CentOS 6 kernel ${kerver}."
+        fi
+      else
+        logecho "compile:do not install kernel devel package for kernel ${kerver}."
+      fi
+    fi
+
+    if test ! -d ${kerneldir}; then
+      if test "$fatal" = "1"; then
+        echo "Default boot kernel ${kerver} does not contain essential build tree to build driver."
+      fi
+      logecho "compile:kernel ${kerver} does not contain kernel headers, active[${fatal}]."
+      continue
+    fi
+
+    for modname in ${modules}; do
+      buildit=0
+      dir=/lib/modules/${kerver}/kernel/drivers
+      existmod=$(find ${dir} -type f -name "${modname}.ko" -print | head -1)
+
+      if test "${existmod}" = ""; then
+        buildit=1
+      fi
+      if test "$FORCE" = "1"; then
+        buildit=1
+      fi
+
+      if test "${buildit}" = "1"; then
+        logecho "compile:existed module file for ${modname}: ${existmod}."
+        logecho "compile:prepare build ${modname}."
+
+        config=$(find "${drvroot}/${modname}" -type f -name config.c)
+        if [ "$config" = "" ]; then
+          logecho "compile:${drvroot}/${modname} is not a valid open source build directory."
+          loglist "${drvroot}/${modname}"
+          continue
+        fi
+
+        rm -rf "${temp}/build_hpt_driver"
+        cp -r "${drvroot}/${modname}" "${temp}/build_hpt_driver"
+        config=$(find "${temp}/build_hpt_driver" -type f -name config.c)
+
+        pushd $(dirname ${config}) >/dev/null
+        logecho "compile:building driver ${modname} for kernel ${kerver}"
+        rm -rf *.ko .build
+        BUILDOPTION=""
+        if grep -s -q SKIP_STACK_VALIDATION $kerneldir/Makefile; then
+          if [ ! -x $kerneldir/tools/objtool/objtool ]; then
+            BUILDOPTION="SKIP_STACK_VALIDATION=1"
+            logecho "compile: $kerneldir can not build with STACK_VALIDATION"
+          fi
+        fi
+        make KERNELDIR=$kerneldir $BUILDOPTION > "$(pwd)/build.log" 2>&1
+        logcat "$(pwd)/build.log"
+        if test -f "${modname}.ko"; then
+          if test "${existmod}" != ""; then
+            logecho "compile:updating driver ${modname} for kernel ${kerver}"
+            rm -f "${existmod}"
+            cp "${modname}.ko" "${existmod}"
+          else
+            logecho "compile:installing driver ${modname} for kernel ${kerver}"
+            mkdir -p "${dir}/scsi/"
+            cp "${modname}.ko" "${dir}/scsi/"
+          fi
+          depmod -a "${kerver}"
+        else
+          logecho "compile:failed to build driver ${modname} for kernel ${kerver}"
+          logcat "$kerneldir/.config"
+          ret=1
+          if test "$fatal" = "1"; then
+            echo "Failed to build driver ${modname} for default boot kernel ${kerver}."
+          fi
+        fi
+
+        rm -rf "${temp}/build_hpt_driver"
+        popd > /dev/null
+      else
+        logecho "compile:module ${modname} not built as it is installed to: ${existmod}."
+      fi
+    done
+  done
+
+  return $ret
+}
+
+distinfo()
+{
+  local issue=/etc/issue
+  local osrelease=/etc/os-release
+
+  [ -e /etc/centos-release ] && { echo centos; return; }
+  [ -e /etc/fedora-release ] && { echo fedora; return; }
+  [ -e /etc/redhat-release ] && { echo redhat; return; }
+  if [ -e $osrelease ]; then
+    grep "^ID=ubuntu" $osrelease -s -q && { echo ubuntu; return; }
+    grep "^ID=fedora" $osrelease -s -q && { echo fedora; return; }
+  fi
+  [ -e /etc/debian_version ] && { echo debian; return; }
+  if [ -e $issue ]; then
+    grep -i "debian" $issue && { echo debian; return; }
+    grep -i "ubuntu" $issue && { echo ubuntu; return; }
+    grep -i "red *hat" $issue && { echo redhat; return; }
+    grep -i "centos" $issue && { echo centos; return; }
+  fi
+}
+
+fixboot()
+{
+  kernels=`systemkernels`
+  logecho "--- --- --- ---"
+  if test "${kernels}" = ""; then
+    logecho "fixboot:no kernels detected."
+    loglist /boot
+    loglist /lib/modules
+    return 0
+  fi
+
+  lsinitrd=`type -p lsinitramfs`
+  if test "${lsinitrd}" = ""; then
+	  lsinitrd=`type -p lsinitrd`
+  fi
+
+  dist=`distinfo`
+
+  mkinitrd=`type -p dracut`
+  [ "$mkinitrd" = "" ] && mkinitrd=`type -p mkinitramfs`
+  [ "$mkinitrd" = "" ] && mkinitrd=`type -p mkinitrd`
+
+  for kernel in ${kernels}; do
+    kerver=`kernelver ${kernel}`
+    if test -f /boot/initrd-${kerver}.img; then
+      initrdfile=/boot/initrd-${kerver}.img
+    elif test -f /boot/initramfs-${kerver}.img; then
+      initrdfile=/boot/initramfs-${kerver}.img
+    elif test -f /boot/initrd-${kerver}; then
+      initrdfile=/boot/initrd-${kerver}
+    elif test -f /boot/initrd.img-${kerver}; then
+      initrdfile=/boot/initrd.img-${kerver}
+    else
+      logecho "fixboot:could not detect initrd file for kernel ${kernel} version ${kerver}"
+      continue
+    fi
+    type=$( file -b "${initrdfile}" | cut -d\  -f1 )
+    case "${type}" in
+      gzip )
+        compress=gzip
+        ;;
+      bzip2 )
+        compress=bzip2
+        ;;
+      lzma|LZMA )
+        compress=lzma
+        ;;
+      xz|XZ )
+        compress=xz
+        ;;
+      * )
+        compress=""
+        ;;
+    esac
+
+    if test "${lsinitrd}" = ""; then
+      if test "${compress}" = ""; then
+        logecho "fixboot:unknown compress method."
+        continue
+      fi
+    fi
+
+    local newest=""
+    dir=/lib/modules/${kerver}/kernel/drivers
+
+    for modname in ${modules}; do
+      existmod=$(find ${dir} -type f -name "${modname}.ko" -print | head -1)
+      if test "$newest" == ""; then
+        logecho "set newest to ${modname}: ${existmod}"
+        newest="$existmod"
+      elif test "$newest" -ot "existmod"; then
+        logecho "compare create date of ${modname}: ${existmod} - ${newest}"
+        newest="$existmod"
+      fi
+    done
+
+    loglist "${newest}"
+    loglist "${initrdfile}"
+
+    if test "$newest" -nt "${initrdfile}"; then
+      case "${dist}" in
+        fedora | redhat | centos )
+          if echo "${mkinitrd}" |grep -s -q "dracut"; then
+            option="-f" # the config file installed will prevent to include r750 from now on
+            logecho "fixboot(2): ${mkinitrd} ${option} "${initrdfile}" "${kerver}""
+            ${mkinitrd} ${option} "${initrdfile}" "${kerver}"
+            # for old version, there should no reason to include r750 in the initrd.
+          else
+            ${mkinitrd} "${initrdfile}" "${kerver}"
+          fi
+          ;;
+        debian | ubuntu )
+          logecho "fixboot(2): ${mkinitrd} -o ${initrdfile} ${kerver}"
+          ${mkinitrd} -o "${initrdfile}" "${kerver}"
+          ;;
+      esac
+    fi
+  done
+}
+
+start()
+{
+  if test "$MODINSTALL" == ""; then
+    for i in ${modules}; do
+      if modinfo $i >/dev/null 2>&1; then
+        modprobe $i >/dev/null 2>&1
+      fi
+    done
+  fi
+  return 0
+}
+
+case "$1" in
+  start)
+    touch ${lock}
+    start
+    rtrn=$?
+    ;;
+  force-stop)
+    # do not remove this file, as reboot need this.
+    #rm /var/lock/subsys/hptdrv-monitor
+    FORCE=1 compile
+    rtrn=$?
+    fixboot
+    ;;
+  stop)
+    compile
+    rtrn=$?
+    fixboot
+    rm -f ${lock}
+    ;;
+  restart)
+    touch ${lock}
+    rtrn=0
+    ;;
+  status)
+    rtrn=0
+    ;;
+  *)
+    echo $"Usage: $0 {start|stop|restart|status}"
+    ;;
+esac
+
+exit $rtrn
+
+# vim: expandtab ts=2 sw=2 ai

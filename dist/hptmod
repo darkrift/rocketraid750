@@ -1,0 +1,68 @@
+#!/bin/bash
+# chkconfig: 12345 10 10
+# description: Rebuild driver for HighPoint HBA if kernel changed.
+### BEGIN INIT INFO
+# Provides: hptmod
+# Required-Start:
+# Required-Stop:
+# Default-Start: S
+# Default-Stop:
+# Short-Description: Load driver for HighPoint HBA if kernel added.
+### END INIT INFO
+modules=
+drvroot=/usr/share/hptdrv
+if test ! -d "${drvroot}"; then
+  exit 0
+fi
+getmodules()
+{
+  if test "${modules}" != ""; then
+    #echo "Specify module to monitor: ${modules}" > /dev/stderr
+    for mod in ${modules}; do
+      mod=$(basename "${mod}")
+     if test -d "${drvroot}/${mod}"; then
+       echo "${mod}"
+     fi
+    done
+  else
+    for mod in $(ls "${drvroot}"); do
+      mod=$(basename "${mod}")
+      if test -d "${drvroot}/${mod}"; then
+        echo "${mod}"
+      fi
+    done
+  fi
+}
+
+start()
+{
+  #name=`modinfo r750 | grep filename | cut -d: -f2`
+  mods=`getmodules`
+  #echo ${mods}
+  for mod in ${mods};do
+    modprobe $mod
+  done
+  return 0
+}
+
+case "$1" in
+  start)
+    start
+    rtrn=$?
+    ;;
+  force-stop)
+    ;;
+  stop)
+    ;;
+  restart)
+    ;;
+  status)
+    ;;
+  *)
+    echo $"Usage: $0 {start|stop|restart|status}"
+    ;;
+esac
+
+exit $rtrn
+
+# vim: expandtab ts=2 sw=2 ai

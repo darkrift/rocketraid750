@@ -1,0 +1,6 @@
+# udev - device node and kernel event manager
+#
+# The udev daemon receives events from the kernel about changes in the
+# /sys filesystem and manages the /dev filesystem.
+
+start on stopped hptdrv

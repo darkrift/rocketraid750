@@ -1,0 +1,5 @@
+#!/bin/bash
+
+echo "Rebuilding HighPoint driver ..."
+/etc/init.d/hptdrv-monitor stop
+

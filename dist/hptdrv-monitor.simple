@@ -1,0 +1,149 @@
+#!/bin/bash
+# chkconfig: 12345 10 10
+# description: Rebuild driver for HighPoint HBA if kernel changed.
+### BEGIN INIT INFO
+# Provides: hptdrv-monitor
+# Required-Start:
+# Required-Stop:
+# Default-Start: 1 2 3 4 5
+# Default-Stop: 0 6
+# Short-Description: Rebuild driver for HighPoint HBA if kernel changed.
+### END INIT INFO
+
+. /etc/init.d/functions
+
+DAEMON=hptdrv-monitor
+GRUBCFG=/boot/grub/grub.conf
+GRUBCFG2=/boot/grub/menu.lst
+
+exec_prefix=
+sbindir=/sbin
+
+MODLIST=$( cd /usr/share/hptdrv/ && ls )
+
+start()
+{
+	ret=0
+	#echo "Starting $DAEMON ..."
+	# task load driver from 
+	for i in "$MODLIST"; do
+		if ( modinfo $i 2> /dev/null ); then
+			modprobe $i
+		fi
+	done
+	touch /var/lock/subsys/hptdrv-monitor
+	return $ret
+}
+
+
+stop()
+{
+	ret=0
+	#echo "Stopping $DAEMON ..."
+	ROOTHOME=`cat /etc/passwd | cut -d: -f3,6 | grep ^0\: | cut -d: -f2`
+	if [ "${ROOTHOME}" == "" ]; then
+		ROOTHOME=/
+	fi
+	echo "ROOTDIR: $ROOTHOME" > /var/log/hptdrv.log
+
+	if [ -f $GRUBCFG ]; then
+		DEFAULT=`grep ^default= $GRUBCFG | cut -d= -f2`
+		DEFAULTKERENL=`/sbin/grubby --default-kernel`
+		KERNEVERFROMNAME=`echo $DEFAULTKERENL | rev | cut -d\/ -f1 | rev | cut -d- -f2-`
+		KERNEVERFROMMAGIC=`echo $DEFAULTKERENL | xargs file -b | sed s'#.*version \+\([^ ]*\) .*#\1#'`
+		#echo $KERNEVERFROMNAME
+		#echo $KERNEVERFROMMAGIC
+		if ( echo "$KERNEVERFROMNAME" | grep -s -q ^2\. ); then
+			KERNEVER=$KERNEVERFROMNAME
+		elif ( echo "$KERNEVERFROMMAGIC" | grep -s -q ^2\. ); then
+			KERNEVER=$KERNEVERFROMMAGIC
+		else
+			echo "Could not determine kernel version." | tee -a /var/log/hptdrv.log
+			exit 1
+		fi
+		echo "Kernel version from name: $KERNEVERFROMNAME" >> /var/log/hptdrv.log
+		echo "Kernel version from magic: $KERNEVERFROMMAGIC" >> /var/log/hptdrv.log
+		echo "Selected kernel version: $KERNEVER" >> /var/log/hptdrv.log
+		echo "Modules to be built: $MODLIST" >> /var/log/hptdrv.log
+
+		KERNELDIR=/lib/modules/$KERNEVER/build
+		for MODULE in "$MODLIST"; do
+			if [ $(find /lib/modules/$KERNEVER/kernel/drivers/scsi -type f -name "$i".ko -print | wc -l ) == "0" ] ; then
+				echo "Driver $MODULE for $KERNEVER is missing and prepare to build." | tee -a /var/log/hptdrv.log
+				if ( ! type make >/dev/null 2>&1 ); then
+					echo "Program make is missing. Failed to build driver. Please install make package." | tee -a /var/log/hptdrv.log
+					break;
+				fi
+				if ( ! type gcc >/dev/null 2>&1 ); then
+					echo "Program gcc is missing. Failed to build driver. Please install gcc package." | tee -a /var/log/hptdrv.log
+					break;
+				fi
+				if [ ! -d /lib/modules/$KERNEVER/build ]; then
+					echo "KERNELDIR $KERNELDIR does not exist or not a directory. Failed to build driver. Please install kernel-devel package." | tee -a /var/log/hptdrv.log
+					break;
+				fi
+				if [ -d /usr/share/hptdrv/$MODULE ]; then
+					mkdir -p /var/tmp
+					rm -rf /var/tmp/build_hpt_driver
+					cp -ar /usr/share/hpt/$MODULE /var/tmp/build_hpt_driver || continue
+					if [ -d /var/tmp/build_hpt_driver/product/*/linux ]; then
+						pushd /var/tmp/build_hpt_driver/product/*/linux
+						echo "  building ..." | tee -a /var/log/hptdrv.log
+						make KERNELDIR=$KERNELDIR 2>&1 | tee -a /var/log/hptdrv.log
+						echo "  installing ..." | tee -a /var/log/hptdrv.log
+						install -m 644 -o root -g root $i.ko /lib/modules/$KERNEVER/kernel/drivers/scsi/
+						depmod -a $KERNEVER
+						# remove conflict module
+						if [ "${MODULE}" = "hptmv" -o "${MODULE}" = "hptmv6"  -o "${MODULE}" = "rr172x" -o "${MODULE}" = "rr174x" -o "${MODULE}" = "rr2310_00" ] ; then
+							find $dir -name sata_mv.* -exec rm -f {} \;
+						elif [ "$MODULE" = "hpt374" -o "$MODULE" = "hpt37x2" ]; then
+							find $dir -name pata_hpt37x.* -exec rm -f {} \;
+						elif [ "${MODULE}" = "rr272x_1x" -o "${MODULE}" = "rr274x_3x" -o "${MODULE}" = "rr276x" -o "${MODULE}" = "rr278x" ]; then
+							find $dir -name mvsas.* -exec rm -f {} \;
+						fi
+						popd
+					else
+						echo "Source exist but could not build driver as build dir missing." | tee -a /var/log/hptdrv.log
+					fi
+				else
+					echo "Source dir /usr/share/hpt/$MODULE for $MODULE does not exist, driver will not built." | tee -a /var/log/hptdrv.log
+				fi
+			fi
+		done
+	else
+		echo "WARNING! No $GRUBCFG found." | tee -a /var/log/hptdrv.log
+	fi
+
+	return $ret
+}
+
+rtrn=1
+
+case "$1" in
+  start)
+	touch /var/lock/subsys/hptdrv-monitor
+	start
+	rtrn=$?
+	;;
+  stop)
+	rm /var/lock/subsys/hptdrv-monitor
+	stop
+	sleep 5
+	rtrn=$?
+	;;
+
+  restart)
+	touch /var/lock/subsys/hptdrv-monitor
+	rtrn=0
+	;;
+
+  status)
+	rtrn=0
+	;;
+
+  *)
+	echo $"Usage: $0 {start|stop|restart|status}"
+	;;
+esac
+
+exit $rtrn
