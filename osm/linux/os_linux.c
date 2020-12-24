@@ -264,7 +264,7 @@ void pcicfg_write_dword(HPT_U8 bus, HPT_U8 dev, HPT_U8 func, HPT_U8 reg, HPT_U32
 HPT_U8 pcicfg_read_byte (HPT_U8 bus, HPT_U8 dev, HPT_U8 func, HPT_U8 reg)
 {
 	HPT_U8 v;
-	struct pci_dev *pPciDev = HPT_FIND_SLOT_DEVICE(bus, PCI_DEVFN(dev,func));
+	struct pci_dev *pPciDev = HPT_FIND_SLOT_DEVICE(0, bus, PCI_DEVFN(dev,func));
 	if (pPciDev == NULL)
 		return 0xff;
 	if (pci_read_config_byte(pPciDev, reg, &v)) return 0xff;
@@ -273,7 +273,7 @@ HPT_U8 pcicfg_read_byte (HPT_U8 bus, HPT_U8 dev, HPT_U8 func, HPT_U8 reg)
 HPT_U16 pcicfg_read_word(HPT_U8 bus, HPT_U8 dev, HPT_U8 func, HPT_U8 reg)
 {
 	HPT_U16 v;
-	struct pci_dev *pPciDev = HPT_FIND_SLOT_DEVICE(bus, PCI_DEVFN(dev,func));
+	struct pci_dev *pPciDev = HPT_FIND_SLOT_DEVICE(0, bus, PCI_DEVFN(dev,func));
 	if (pPciDev == NULL)
 		return 0xffff;
 	if (pci_read_config_word(pPciDev, reg, &v)) return 0xffff;
@@ -282,7 +282,7 @@ HPT_U16 pcicfg_read_word(HPT_U8 bus, HPT_U8 dev, HPT_U8 func, HPT_U8 reg)
 HPT_U32 pcicfg_read_dword(HPT_U8 bus, HPT_U8 dev, HPT_U8 func, HPT_U8 reg)
 {
 	HPT_U32 v;
-	struct pci_dev *pPciDev = HPT_FIND_SLOT_DEVICE(bus, PCI_DEVFN(dev,func));
+	struct pci_dev *pPciDev = HPT_FIND_SLOT_DEVICE(0, bus, PCI_DEVFN(dev,func));
 	if (pPciDev == NULL)
 		return 0xffffffff;
 	if (pci_read_config_dword(pPciDev, reg, (unsigned int *)&v)) return 0xffffffff;
@@ -291,21 +291,21 @@ HPT_U32 pcicfg_read_dword(HPT_U8 bus, HPT_U8 dev, HPT_U8 func, HPT_U8 reg)
 
 void pcicfg_write_byte(HPT_U8 bus, HPT_U8 dev, HPT_U8 func, HPT_U8 reg, HPT_U8 v)
 {
-	struct pci_dev *pPciDev = HPT_FIND_SLOT_DEVICE(bus, PCI_DEVFN(dev,func));
+	struct pci_dev *pPciDev = HPT_FIND_SLOT_DEVICE(0, bus, PCI_DEVFN(dev,func));
 	if (pPciDev == NULL)
 		return ;
 	pci_write_config_byte(pPciDev,reg, v);
 }
 void pcicfg_write_word(HPT_U8 bus, HPT_U8 dev, HPT_U8 func, HPT_U8 reg, HPT_U16 v)
 {
-	struct pci_dev *pPciDev = HPT_FIND_SLOT_DEVICE(bus, PCI_DEVFN(dev,func));
+	struct pci_dev *pPciDev = HPT_FIND_SLOT_DEVICE(0, bus, PCI_DEVFN(dev,func));
 	if (pPciDev == NULL)
 		return ;
 	pci_write_config_word(pPciDev,reg, v);
 }
 void pcicfg_write_dword(HPT_U8 bus, HPT_U8 dev, HPT_U8 func, HPT_U8 reg, HPT_U32 v)
 {
-	struct pci_dev *pPciDev = HPT_FIND_SLOT_DEVICE(bus, PCI_DEVFN(dev,func));
+	struct pci_dev *pPciDev = HPT_FIND_SLOT_DEVICE(0, bus, PCI_DEVFN(dev,func));
 	if (pPciDev == NULL)
 		return ;
 	pci_write_config_dword(pPciDev,reg, v);
@@ -634,9 +634,16 @@ HPT_U8 os_get_vbus_seq(void *osext)
 	return ((PVBUS_EXT)osext)->host->host_no;
 }
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 15, 0)
 static void os_timer_for_ldm(unsigned long data)
 {
 	PVBUS_EXT vbus_ext = (PVBUS_EXT)data;
+#else
+static void os_timer_for_ldm(struct timer_list *t)
+{
+	PVBUS_EXT vbus_ext = from_timer(vbus_ext, t, timer);
+#endif
+
 	unsigned long flags;
 
 	spin_lock_irqsave(vbus_ext->lock, flags);
@@ -652,7 +659,11 @@ void  os_request_timer(void * osext, HPT_U32 interval)
 	
 	del_timer(&vbus_ext->timer);
 	vbus_ext->timer.function = os_timer_for_ldm;
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(4, 15, 0))	
 	vbus_ext->timer.data = (unsigned long)vbus_ext;
+#else
+	timer_setup(&vbus_ext->timer, os_timer_for_ldm, 0);
+#endif
 	vbus_ext->timer.expires = jiffies + 1 + interval / (1000000/HZ);
 	add_timer(&vbus_ext->timer);
 }

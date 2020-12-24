@@ -310,7 +310,7 @@ static void ldm_initialize_vbus_done(void *osext)
 	up(&((PVBUS_EXT)osext)->sem);
 }
 
-
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,16,18)
 static int hpt_detect (Scsi_Host_Template *tpnt)
 {
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,5,0)
@@ -377,7 +377,6 @@ static int hpt_detect (Scsi_Host_Template *tpnt)
 		spin_lock_init(&initlock);
 		vbus_ext->lock = &initlock;
 		init_timer(&vbus_ext->timer);
-
 		sema_init(&vbus_ext->sem, 0);
 		spin_lock_irq(&initlock);
 		ldm_initialize_vbus_async(vbus,
@@ -454,6 +453,7 @@ static int hpt_detect (Scsi_Host_Template *tpnt)
 #endif
 	return i;
 }
+#endif
 
 static unsigned int fill_msense_rw_recovery(PVDEV pVDev, HPT_U8 *p, HPT_U32 output_len, HPT_U32 bufflen)
 {
@@ -1855,10 +1855,18 @@ static void hpt_flush_done(PCOMMAND pCmd)
 	up(sem);
 }
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,15,0)
 static void cmd_timeout_sem(unsigned long data)
 {
 	up((struct semaphore *)(HPT_UPTR)data);
 }
+#else
+static void cmd_timeout_sem(struct timer_list *timer)
+{
+	TIMER_HOLDER *data = from_timer(data, timer, timer);
+	up(&data->sem);
+}
+#endif
 
 /*
  * flush a vdev (without retry).
@@ -1867,8 +1875,7 @@ static int hpt_flush_vdev(PVBUS_EXT vbus_ext, PVDEV vd)
 {
 	PCOMMAND pCmd;
 	unsigned long flags, timeout;
-	struct timer_list timer;
-	struct semaphore sem;
+	TIMER_HOLDER holder;
 	int result = 0;
 	HPT_UINT count;
 
@@ -1892,31 +1899,35 @@ static int hpt_flush_vdev(PVBUS_EXT vbus_ext, PVDEV vd)
 	pCmd->type = CMD_TYPE_FLUSH;
 	pCmd->flags.hard_flush = 1;
 	pCmd->target = vd;
-	pCmd->priv2 = (HPT_UPTR)&sem;
+	pCmd->priv2 = (HPT_UPTR)&holder.sem;
 	pCmd->done = hpt_flush_done;
 
-	sema_init(&sem, 0);
+	sema_init(&holder.sem, 0);
 	ldm_queue_cmd(pCmd);
 
 wait:
 	spin_unlock_irqrestore(vbus_ext->lock, flags);
 
-	if (down_trylock(&sem)) {
+	if (down_trylock(&holder.sem)) {
 		timeout = jiffies + 20 * HZ;
-		init_timer(&timer);
-		timer.expires = timeout;
-		timer.data = (HPT_UPTR)&sem;
-		timer.function = cmd_timeout_sem;
-		add_timer(&timer);
-		if (down_interruptible(&sem))
-			down(&sem);
-		del_timer(&timer);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,15,0)
+		init_timer(&holder.timer);
+		holder.timer.data = (HPT_UPTR)&holder.sem;
+		holder.timer.function = cmd_timeout_sem;
+#else
+		timer_setup(&holder.timer, cmd_timeout_sem, 0);
+#endif
+		holder.timer.expires = timeout;
+		add_timer(&holder.timer);
+		if (down_interruptible(&holder.sem))
+			down(&holder.sem);
+		del_timer(&holder.timer);
 	}
 
 	spin_lock_irqsave(vbus_ext->lock, flags);
 
 	if (pCmd->Result==RETURN_PENDING) {
-		sema_init(&sem, 0);
+		sema_init(&holder.sem, 0);
 		ldm_reset_vbus(vd->vbus);
 		goto wait;
 	}
@@ -2027,6 +2038,7 @@ static int hpt_halt(struct notifier_block *nb, ulong event, void *buf)
 }
 #endif
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,16,18)
 static int hpt_release (struct Scsi_Host *host)
 {
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,5,0)
@@ -2041,6 +2053,7 @@ static int hpt_release (struct Scsi_Host *host)
 #endif
 	return 0;
 }
+#endif
 
 #ifndef CONFIG_SCSI_PROC_FS
 static void  __hpt_do_async_ioctl(PVBUS_EXT vbus_ext,IOCTL_ARG* ioctl_args)
@@ -2176,16 +2189,23 @@ static void hpt_ioctl_done(struct _IOCTL_ARG *arg)
 	arg->ioctl_cmnd = 0;
 }
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,15,0)
 static void hpt_ioctl_timeout(unsigned long data)
 {
 	up((struct semaphore *)data);
 }
+#else
+static void hpt_ioctl_timeout(struct timer_list *timer)
+{
+       TIMER_HOLDER *holder = from_timer(holder, timer, timer);
+       up(&holder->sem);
+}
+#endif
 
 void __hpt_do_ioctl(PVBUS_EXT vbus_ext, IOCTL_ARG *ioctl_args)
 {
 	unsigned long flags, timeout;
-	struct timer_list timer;
-	struct semaphore sem;
+	TIMER_HOLDER holder;
 
 	if (vbus_ext->needs_refresh
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,5,0)
@@ -2198,8 +2218,8 @@ void __hpt_do_ioctl(PVBUS_EXT vbus_ext, IOCTL_ARG *ioctl_args)
 
 	ioctl_args->result = -1;
 	ioctl_args->done = hpt_ioctl_done;
-	ioctl_args->ioctl_cmnd = &sem;
-	sema_init(&sem, 0);
+	ioctl_args->ioctl_cmnd = &holder.sem;
+	sema_init(&holder.sem, 0);
 
 	spin_lock_irqsave(vbus_ext->lock, flags);
 	ldm_ioctl((PVBUS)vbus_ext->vbus, ioctl_args);
@@ -2207,22 +2227,26 @@ void __hpt_do_ioctl(PVBUS_EXT vbus_ext, IOCTL_ARG *ioctl_args)
 wait:
 	spin_unlock_irqrestore(vbus_ext->lock, flags);
 
-	if (down_trylock(&sem)) {
+	if (down_trylock(&holder.sem)) {
 		timeout = jiffies + 20 * HZ;
-		init_timer(&timer);
-		timer.expires = timeout;
-		timer.data = (HPT_UPTR)&sem;
-		timer.function = hpt_ioctl_timeout;
-		add_timer(&timer);
-		if (down_interruptible(&sem))
-			down(&sem);
-		del_timer(&timer);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,15,0)
+		init_timer(&holder.timer);
+		holder.timer.expires = timeout;
+		holder.timer.data = (HPT_UPTR)&holder.sem;
+		holder.timer.function = hpt_ioctl_timeout;
+#else
+		timer_setup(&holder.timer, hpt_ioctl_timeout, 0);
+#endif
+		add_timer(&holder.timer);
+		if (down_interruptible(&holder.sem))
+			down(&holder.sem);
+		del_timer(&holder.timer);
 	}
 
 	spin_lock_irqsave(vbus_ext->lock, flags);
 
 	if (ioctl_args->ioctl_cmnd) {
-		sema_init(&sem, 0);
+		sema_init(&holder.sem, 0);
 		ldm_reset_vbus((PVBUS)vbus_ext->vbus);
 		__hpt_do_tasks(vbus_ext);
 		goto wait;
@@ -2634,7 +2658,7 @@ static HPT_U32 hpt_scsi_ioctl_get_diskid(Scsi_Device * dev, int cmd, void *arg)
 
 int (*hpt_scsi_ioctl_handler)(Scsi_Device * dev, int cmd, void *arg) = 0;
 
-static int hpt_scsi_ioctl(Scsi_Device * dev, int cmd, void *arg)
+static int hpt_scsi_ioctl(Scsi_Device * dev, unsigned int cmd, void *arg)
 {
 	/* support for HDIO_xxx ioctls */
 	if ((cmd & 0xfffff300)==0x300) {
@@ -2659,8 +2683,10 @@ static int hpt_scsi_ioctl(Scsi_Device * dev, int cmd, void *arg)
  */
 static Scsi_Host_Template driver_template = {
 	name:                    driver_name,
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,16,18)
 	detect:                  hpt_detect,
 	release:                 hpt_release,
+#endif
 	queuecommand:            hpt_queuecommand,
 	eh_device_reset_handler: hpt_reset,
 	eh_bus_reset_handler:    hpt_reset,
@@ -2670,8 +2696,14 @@ static Scsi_Host_Template driver_template = {
 	cmd_per_lun:             1,
 	unchecked_isa_dma:       0,
 	emulated:                0,
+
+// TODO Find the proper version this was changed in
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,15,0)
 	/* ENABLE_CLUSTERING will cause problem when we handle PIO for highmem_io */
-	use_clustering:          DISABLE_CLUSTERING,
+	use_clustering		 DISABLE_CLUSTERING,
+#else
+	dma_boundary:            PAGE_SIZE - 1,
+#endif
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,5,0) /* 2.4.x */
 	use_new_eh_code:         1,
 	proc_name:               driver_name,
@@ -2741,7 +2773,11 @@ static int hpt_init_all(HIM *him, struct pci_dev *dev)
 
 		spin_lock_init(&initlock);
 		vbus_ext->lock = &initlock;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,15,0)
 		init_timer(&vbus_ext->timer);
+#else
+		timer_setup(&vbus_ext->timer, cmd_timeout_sem, 0);
+#endif
 
 		sema_init(&vbus_ext->sem, 0);
 		spin_lock_irq(&initlock);

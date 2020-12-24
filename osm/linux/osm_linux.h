@@ -190,7 +190,7 @@ typedef void irqreturn_t;
 #endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,11)
-#define hpt_verify_area(type, addr, size) (!access_ok((type), (addr), (size)))
+#define hpt_verify_area(type, addr, size) (!hpt_access_ok((type), (addr), (size)))
 #else 
 #define hpt_verify_area(type, addr, size) (verify_area((type), (addr), (size)))
 #endif
@@ -208,7 +208,7 @@ typedef void irqreturn_t;
 #endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,21)
-#define HPT_FIND_SLOT_DEVICE pci_get_bus_and_slot
+#define HPT_FIND_SLOT_DEVICE pci_get_domain_bus_and_slot
 #else 
 #define HPT_FIND_SLOT_DEVICE pci_find_slot
 #endif
@@ -296,6 +296,21 @@ typedef struct _ioctl_cmd {
 	
 }
 IOCTL_CMD, *PIOCTL_CMD;
+
+typedef struct _timer_holder {
+
+	struct semaphore sem;
+
+	struct timer_list timer;
+}
+TIMER_HOLDER, *PTIMER_HOLDER;
+
+/* 5.0 API change - no more 'type' argument for access_ok() */
+#ifdef HAVE_ACCESS_OK_TYPE
+#define	hpt_access_ok(type, addr, size)	access_ok(type, addr, size)
+#else
+#define	hpt_access_ok(type, addr, size)	access_ok(addr, size)
+#endif
 
 #define SD_FLAG_IN_USE     1
 #define SD_FLAG_REVALIDATE 2
