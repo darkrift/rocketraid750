@@ -121,7 +121,7 @@ endif
 
 .PHONY: $(CURDIR)/.build/Makefile
 $(CURDIR)/.build/Makefile:
-	@mkdir -p $(CURDIR)/.build
+	@mkdir -p $(CURDIR)/.build && touch $(CURDIR)/.build/.him_r750.o.cmd && touch $(CURDIR)/.build/.ldm_la.o.cmd
 	@echo '# auto generated makefile' > $@
 	@echo 'HPT_ROOT := $(HPT_ROOT)' >> $@
 	@echo 'HPT_REGPARM := $$(shell echo "$$(CFLAGS) $$(KBUILD_CFLAGS)" | awk '"'"'{ match($$$$0,"-mregparm="); if (RSTART>0) print substr($$$$0,RSTART+10,1);}'"'"')' >> $@
