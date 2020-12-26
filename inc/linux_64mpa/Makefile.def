@@ -109,9 +109,15 @@ ifneq ($(KERNEL_VER), 2.4)
 
 TARGET := $(TARGETNAME).ko
 
+ifneq ($(MAJOR), 5)
+$(TARGETNAME).ko: $(CURDIR)/.build/Makefile
+	@$(MAKE) -C $(KERNELDIR) SUBDIRS=$(CURDIR)/.build modules
+	@cp -f $(CURDIR)/.build/$(TARGETNAME).ko $(CURDIR)/
+else
 $(TARGETNAME).ko: $(CURDIR)/.build/Makefile
 	@$(MAKE) -C $(KERNELDIR) M=$(CURDIR)/.build modules
 	@cp -f $(CURDIR)/.build/$(TARGETNAME).ko $(CURDIR)/
+endif
 
 .PHONY: $(CURDIR)/.build/Makefile
 $(CURDIR)/.build/Makefile:

@@ -1,11 +1,13 @@
-FROM ubuntu
-ARG KERNEL_VERSION=5.8.0-33-generic
-
+FROM ubuntu:16.04
+ARG KERNEL_VERSION=4.8.0-34-generic
 ENV DEBIAN_FRONTEND="noninteractive" TZ="America/New_York"
 RUN apt-get update && apt-get install -y dkms gcc perl make libelf-dev bison flex debhelper
 RUN apt-get install -y linux-headers-${KERNEL_VERSION}
 
-ADD . /usr/src/r750-1.2.10.1
+ADD r750-linux-src-v1.2.10.1-17_01_23.bin /
+RUN ./r750-linux-src-v1.2.10.1-17_01_23.bin --target /usr/src/r750-1.2.10.1
+ADD dkms.conf /usr/src/r750-1.2.10.1/
+#ADD . /usr/src/r750-1.2.10.1
 
 RUN dkms add -m r750 -v 1.2.10.1
 RUN dkms mkdeb -m r750 -v 1.2.10.1 --source-only
